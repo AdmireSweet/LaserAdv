@@ -1,36 +1,227 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Whisper Batch Transcription Evaluation
+
+This script uses OpenAI Whisper to batch-transcribe WAV files in a directory
+and evaluate attack success based on transcription results.
+
+Typical use cases:
+- Physical adversarial audio attack evaluation
+- Robustness analysis of ASR systems
+- Artifact evaluation and reproducibility
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import List, Tuple
+
 import whisper
-import os
 
-# model = whisper.load_model("base")
-# result = model.transcribe("D:/robust_audio_ae/c_delta.wav")
-# print("---" + result["text"] + "---")
 
-path_file = 'E:/AdvExperiments/physical/honor_gohome/results2'   
+# =========================
+# Utility Functions
+# =========================
 
-# 遍历文件夹中的所有文件
-for i in range(1, 51) :  
-    success_count = 0
-    fail_count = 0
-    home = 0
-    # 检查当前项是否为文件
-    for file_name in os.listdir(path_file):
-        if os.path.isfile(os.path.join(path_file, file_name)):
-            # 检查文件扩展名是否为 WAV
-            if file_name.endswith('.wav') and file_name.startswith(str(i)+'syn'):
-                # 在这里对文件进行操作
-                print(file_name)
-                file_name_all = path_file + '\\' + file_name
-                model = whisper.load_model("base")
-                result = model.transcribe(file_name_all)
-                print(result["text"])
-                if (result["text"] == " Go home!" or result["text"] == " Go home." or result["text"] == " go home.") :
+def normalize_text(text: str) -> str:
+    """
+    Normalize transcription text for robust comparison.
+
+    Parameters
+    ----------
+    text : str
+        Raw transcription output.
+
+    Returns
+    -------
+    normalized : str
+        Lowercased and stripped text.
+    """
+    return text.strip().lower()
+
+
+def evaluate_transcription(
+    text: str,
+    target: str = "go home",
+) -> Tuple[bool, bool]:
+    """
+    Evaluate transcription result.
+
+    Parameters
+    ----------
+    text : str
+        Transcribed text.
+    target : str
+        Target command phrase.
+
+    Returns
+    -------
+    success : bool
+        Whether the transcription exactly matches the target.
+    contains_target : bool
+        Whether the transcription contains the target keyword.
+    """
+    text_norm = normalize_text(text)
+    target_norm = normalize_text(target)
+
+    success = text_norm in {
+        target_norm,
+        f"{target_norm}!",
+        f"{target_norm}.",
+    }
+    contains_target = target_norm in text_norm
+
+    return success, contains_target
+
+
+# =========================
+# Core Evaluation Logic
+# =========================
+
+def run_batch_evaluation(
+    audio_dir: Path,
+    model_name: str,
+    prefix: str,
+    target_phrase: str,
+    index_range: range,
+    output_file: Path,
+) -> None:
+    """
+    Run batch Whisper transcription and evaluation.
+
+    Parameters
+    ----------
+    audio_dir : Path
+        Directory containing WAV files.
+    model_name : str
+        Whisper model name (e.g., base, small, medium).
+    prefix : str
+        Filename prefix pattern (e.g., "{i}syn").
+    target_phrase : str
+        Target transcription phrase.
+    index_range : range
+        Range of indices to evaluate.
+    output_file : Path
+        Path to output result log file.
+    """
+    model = whisper.load_model(model_name)
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_file.open("a", encoding="utf-8") as f:
+        for i in index_range:
+            success_count = 0
+            fail_count = 0
+            partial_count = 0
+
+            for wav_path in sorted(audio_dir.glob(f"{i}{prefix}*.wav")):
+                result = model.transcribe(str(wav_path))
+                text = result.get("text", "")
+
+                success, contains_target = evaluate_transcription(
+                    text=text,
+                    target=target_phrase,
+                )
+
+                if success:
                     success_count += 1
-                elif ("home" in result["text"]) :
-                    home += 1
-                else :
+                elif contains_target:
+                    partial_count += 1
+                else:
                     fail_count += 1
-                print("success_count = ", success_count, " fail_count = ", fail_count, " home_count = ", home)  
-    txt_path = path_file + '\\' + "record.txt"
-    file = open(txt_path, "a")
-    file.write("success = " + str(success_count) + "\thome = " + str(home) + "\tfail = " + str(fail_count) + '\n')
-    file.close() 
+
+                print(
+                    f"[{wav_path.name}] "
+                    f"-> \"{text}\" "
+                    f"(success={success}, contains={contains_target})"
+                )
+
+            f.write(
+                f"index={i}\t"
+                f"success={success_count}\t"
+                f"partial={partial_count}\t"
+                f"fail={fail_count}\n"
+            )
+
+            print(
+                f"[Summary index={i}] "
+                f"success={success_count}, "
+                f"partial={partial_count}, "
+                f"fail={fail_count}"
+            )
+
+
+# =========================
+# CLI
+# =========================
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Batch evaluation of adversarial audio using Whisper ASR."
+    )
+    parser.add_argument(
+        "--audio_dir",
+        type=Path,
+        required=True,
+        help="Directory containing WAV files.",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="base",
+        help="Whisper model name (default: base).",
+    )
+    parser.add_argument(
+        "--prefix",
+        type=str,
+        default="syn",
+        help="Filename prefix after index (default: syn).",
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        default="go home",
+        help="Target transcription phrase.",
+    )
+    parser.add_argument(
+        "--start",
+        type=int,
+        default=1,
+        help="Start index (inclusive).",
+    )
+    parser.add_argument(
+        "--end",
+        type=int,
+        default=50,
+        help="End index (inclusive).",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("results/record.txt"),
+        help="Output log file path.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    if not args.audio_dir.exists():
+        raise FileNotFoundError(f"Audio directory not found: {args.audio_dir}")
+
+    run_batch_evaluation(
+        audio_dir=args.audio_dir,
+        model_name=args.model,
+        prefix=args.prefix,
+        target_phrase=args.target,
+        index_range=range(args.start, args.end + 1),
+        output_file=args.output,
+    )
+
+
+if __name__ == "__main__":
+    main()
